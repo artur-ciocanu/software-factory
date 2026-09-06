@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -161,9 +162,8 @@ def test_sheila_raw_create_guard_only_blocks_verified_root(ctx: Dispatch, monkey
     assert factory._raw_create_guard(ctx, "kanban_create", {})["action"] == "block"
 
 
-def test_package_compiles_with_hermes_python_when_present() -> None:
-    python = Path("/Users/ciocanu/.hermes/hermes-agent/.venv/bin/python")
-    executable = str(python) if python.exists() else sys.executable
+def test_package_compiles_with_configured_hermes_python() -> None:
+    executable = os.environ.get("HERMES_PYTHON", sys.executable)
     package = Path(factory.__file__).resolve().parent
     result = subprocess.run([executable, "-m", "compileall", "-q", str(package)], check=False, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
