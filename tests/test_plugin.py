@@ -174,6 +174,57 @@ def test_materialize_creates_native_topology_with_exact_readback(ctx: Dispatch, 
     assert all({"title", "assignee", "body", "parents", "project_id", "idempotency_key"} <= set(args) for args in creates)
 
 
+def test_materialize_includes_ferris_terminal_fan_in_and_is_idempotent(
+    ctx: Dispatch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = json.loads(ctx.files["handoff.json"])
+    payload["verified_plan"]["topology"].append(
+        {
+            "unit_id": "integrate",
+            "owner": "ferris",
+            "phases": [
+                {
+                    "name": "integrate",
+                    "shares_card": False,
+                    "shares_worktree": False,
+                    "shares_branch": False,
+                    "shares_candidate": False,
+                    "shares_verifier": False,
+                }
+            ],
+            "parents": ["impl", "verify"],
+        }
+    )
+    handoff_bytes = json.dumps(payload).encode()
+    ctx.files["handoff.json"] = handoff_bytes
+    handoff_attachment = next(item for item in ctx.attachments["T1"] if item["filename"] == "handoff.json")
+    handoff_attachment["size"] = len(handoff_bytes)
+    (ctx.root / "T1" / "handoff.json").write_bytes(handoff_bytes)
+    handoff = VerifiedHandoff.parse(payload)
+    ctx.tasks["T1"]["body"] = factory._verified_root_body(handoff)
+    ctx.cli_tasks["T1"]["body"] = ctx.tasks["T1"]["body"]
+    monkeypatch.setenv("HERMES_PROFILE", "sheila")
+
+    assert factory.materialize(ctx, {})["created_task_ids"] == ["C1", "C2", "C3"]
+    assert ctx.tasks["C3"]["assignee"] == "ferris"
+    assert ctx.parents["C3"] == ["T1", "C1", "C2"]
+    ferris_marker = factory._unit_marker(ctx.tasks["C3"])
+    assert ferris_marker == {
+        "schema_version": 1,
+        "handoff_identity": handoff.identity(),
+        "graph_identity": handoff.graph_identity,
+        "root_task_id": "T1",
+        "unit_id": "integrate",
+        "role": "ferris",
+    }
+    first_creates = [args for name, args in ctx.calls if name == "kanban_create"]
+
+    assert factory.materialize(ctx, {})["created_task_ids"] == ["C1", "C2", "C3"]
+    all_creates = [args for name, args in ctx.calls if name == "kanban_create"]
+    assert len(ctx.tasks) == 4
+    assert all_creates[3:] == first_creates
+
+
 def test_quentin_publishes_exact_idempotent_verified_root(ctx: Dispatch, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HERMES_PROFILE", "quentin")
     result = factory.publish_verified_root(ctx, {})
@@ -313,6 +364,33 @@ def test_registration_is_exact_for_all_profiles() -> None:
         assert {tool["name"] for tool in registry.tools} == names
         assert all(tool["schema"] == factory.SCHEMAS[tool["name"]] for tool in registry.tools)
         assert registry.hooks == (["pre_tool_call"] if profile in {"quentin", "sheila"} else [])
+
+
+def test_ferris_registration_has_no_software_factory_authority() -> None:
+    class Registry:
+        profile_name = "ferris"
+
+        def __init__(self) -> None:
+            self.tools: list[dict] = []
+            self.hooks: list[str] = []
+
+        def register_tool(self, **kwargs):
+            self.tools.append(kwargs)
+
+        def register_hook(self, name, _handler):
+            self.hooks.append(name)
+
+    registry = Registry()
+    factory.register(registry)
+    assert registry.tools == []
+    assert registry.hooks == []
+
+
+def test_candidate_policy_does_not_allow_ferris_implementation_units(ctx: Dispatch) -> None:
+    payload = json.loads(ctx.files["handoff.json"])
+    payload["verified_plan"]["topology"][0]["owner"] = "ferris"
+    with pytest.raises(ValueError, match="candidate policy does not bind independent verifier"):
+        VerifiedHandoff.parse(payload)
 
 
 def test_package_compiles_with_configured_hermes_python() -> None:

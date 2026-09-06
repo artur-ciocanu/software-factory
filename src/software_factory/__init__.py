@@ -207,7 +207,7 @@ def re_full_sha(value: str) -> bool:
 def _unit_marker(task: Mapping[str, Any]) -> dict[str, str]:
     marker = _marker(task["body"], UNIT_MARKER)
     fields = {"schema_version", "handoff_identity", "graph_identity", "root_task_id", "unit_id", "role"}
-    if set(marker) != fields or marker.get("schema_version") != 1 or marker.get("role") not in {"coddy", "tammy"}:
+    if set(marker) != fields or marker.get("schema_version") != 1 or marker.get("role") not in {"coddy", "tammy", "ferris"}:
         raise ContractError("unit marker schema is invalid")
     for key in ("handoff_identity", "graph_identity", "root_task_id", "unit_id"):
         if not isinstance(marker.get(key), str) or not marker[key]:
@@ -341,8 +341,6 @@ def materialize(ctx: Any, _args: Mapping[str, Any]) -> dict[str, Any]:
     created: list[str] = []
     by_unit: dict[str, str] = {}
     for unit in handoff.units:
-        if unit.owner not in {"coddy", "tammy"}:
-            continue
         parents = [root_id] + [by_unit[parent] for parent in unit.parents if parent in by_unit]
         if len(parents) != 1 + len(unit.parents):
             raise ContractError("materialization topology is not dependency ordered")
