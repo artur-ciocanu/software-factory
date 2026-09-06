@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.entry-points."hermes_agent.plugins"]
-software-factory = "software_factory:register"
+software-factory = "software_factory"
 
 [build-system]
 requires = ["hatchling"]
@@ -25,7 +25,7 @@ line-length = 100
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "B", "UP", "ARG", "SIM"]
+select = ["E", "W", "F", "I", "B", "UP", "ARG", "SIM", "PLC0415"]
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]

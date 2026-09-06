@@ -42,6 +42,10 @@ def _profile(ctx: Any | None = None) -> str:
     value = getattr(ctx, "profile_name", None) if ctx is not None else None
     if not isinstance(value, str) or not value.strip():
         value = os.environ.get("HERMES_PROFILE_NAME") or os.environ.get("HERMES_PROFILE")
+    if not isinstance(value, str) or not value.strip():
+        home = os.environ.get("HERMES_HOME", "").strip()
+        candidate = Path(home).name.lower() if home else ""
+        value = candidate if candidate in ROLES else ""
     return value.strip().lower() if isinstance(value, str) else ""
 
 

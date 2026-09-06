@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -79,7 +80,6 @@ class Dispatch:
             self.attachments[task_id] = []
             return json.dumps({"ok": True, "task_id": task_id})
         if name == "kanban_attach":
-            import base64
             self.add_attachment(args["task_id"], args["filename"], base64.b64decode(args["content_base64"]))
             return json.dumps({"ok": True, "task_id": args["task_id"], "attachment_id": len(self.attachments[args["task_id"]])})
         raise AssertionError(name)
@@ -109,6 +109,13 @@ def test_preflight_uses_json_string_native_envelopes_and_attachment_paths(ctx: D
     assert {name for name, _ in ctx.calls} == {"kanban_show", "kanban_attachments"}
     assert all("include_bytes" not in args for _, args in ctx.calls)
     assert ctx.cli_calls == [(["hermes", "kanban", "show", "T1", "--json"], {"check": False, "capture_output": True, "text": True, "timeout": 15})]
+
+
+def test_profile_falls_back_to_named_hermes_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    monkeypatch.delenv("HERMES_PROFILE_NAME", raising=False)
+    monkeypatch.setenv("HERMES_HOME", "/factory/profiles/tammy")
+    assert factory._profile() == "tammy"
 
 
 def test_wrong_profile_fails_closed_before_native_calls(ctx: Dispatch, monkeypatch: pytest.MonkeyPatch) -> None:
