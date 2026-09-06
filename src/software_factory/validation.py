@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any
 
@@ -26,6 +26,22 @@ def canonical_json(value: object) -> bytes:
 
 def digest(value: object) -> str:
     return sha256(canonical_json(value)).hexdigest()
+
+
+def graph_identity(value: object) -> str:
+    """Return a handoff identity without trusting its self-referential claim."""
+    raw = _object(value, "verified_handoff")
+    plan = _object(raw.get("verified_plan"), "verified plan")
+    supersession = _object(plan.get("supersession"), "supersession")
+    return digest(
+        {
+            **raw,
+            "verified_plan": {
+                **plan,
+                "supersession": {key: item for key, item in supersession.items() if key != "graph_identity"},
+            },
+        }
+    )
 
 
 def _object(value: object, where: str) -> dict[str, Any]:
@@ -172,12 +188,33 @@ class VerifiedHandoff:
         by_id = {x.unit_id: x for x in units}
         if not units or len(by_id) != len(units) or any(p not in by_id or p == x.unit_id for x in units for p in x.parents):
             raise ContractError("topology graph is invalid")
+        children = {unit_id: set() for unit_id in by_id}
+        for unit in units:
+            for parent in unit.parents:
+                children[parent].add(unit.unit_id)
+        pending = {unit_id: len(unit.parents) for unit_id, unit in by_id.items()}
+        ready = [unit_id for unit_id, count in pending.items() if count == 0]
+        visited = 0
+        while ready:
+            unit_id = ready.pop()
+            visited += 1
+            for child in children[unit_id]:
+                pending[child] -= 1
+                if pending[child] == 0:
+                    ready.append(child)
+        if visited != len(by_id):
+            raise ContractError("topology graph contains a cycle")
         policy = tuple(CandidatePolicy.parse(x) for x in _array(plan["candidate_policy"], "candidate policy"))
         if not policy or len({(x.implementation_unit, x.verifier_unit) for x in policy}) != len(policy):
             raise ContractError("candidate policy is invalid")
         for p in policy:
             if p.implementation_unit not in by_id or p.verifier_unit not in by_id or by_id[p.implementation_unit].owner != "coddy" or by_id[p.verifier_unit].owner != "tammy" or p.implementation_unit not in by_id[p.verifier_unit].parents:
                 raise ContractError("candidate policy does not bind independent verifier")
+        terminals = [unit for unit in units if not children[unit.unit_id]]
+        if len(terminals) != 1 or terminals[0].owner != "ferris":
+            raise ContractError("topology requires exactly one ferris terminal")
+        if not {p.verifier_unit for p in policy} <= set(terminals[0].parents):
+            raise ContractError("ferris terminal must depend on every selected tammy verifier")
         sup = _object(plan["supersession"], "supersession")
         _only(sup, {"graph_identity", "predecessor_graph_identity", "recovery_attempt"}, "supersession")
         graph = _text(sup["graph_identity"], "graph identity", SHA256)
@@ -185,10 +222,12 @@ class VerifiedHandoff:
         attempt = sup["recovery_attempt"]
         if (predecessor is not None and not isinstance(predecessor, str)) or type(attempt) is not int or attempt < 0 or ((attempt == 0) != (predecessor is None)):
             raise ContractError("supersession is invalid")
+        if graph != graph_identity(raw):
+            raise ContractError("declared graph identity does not match canonical handoff")
         return cls(_text(plan["plan_id"], "plan id", SLUG), _text(plan["logical_project_slug"], "project slug", SLUG), _text(plan["implementation_base_sha"], "base sha", SHA40), _text(plan["sealed_plan_sha256"], "sealed plan sha", SHA256), size, CallerManifest.parse(plan["caller_manifest"]), units, policy, graph)
 
     def identity(self) -> str:
-        return digest(asdict(self))
+        return self.graph_identity
 
 
 def validate_evidence(handoff: VerifiedHandoff, sealed_plan: bytes, caller_inventory: bytes) -> None:

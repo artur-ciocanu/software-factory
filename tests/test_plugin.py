@@ -11,11 +11,11 @@ from pathlib import Path
 import pytest
 
 import software_factory as factory
-from software_factory.validation import ROOT_MARKER, VerifiedHandoff
+from software_factory.validation import ROOT_MARKER, VerifiedHandoff, graph_identity
 
 
 def handoff_payload(sealed: bytes, inventory: bytes) -> dict:
-    return {
+    payload = {
         "schema_version": 2,
         "requested_by": "quentin",
         "board_slug": "factory",
@@ -36,11 +36,18 @@ def handoff_payload(sealed: bytes, inventory: bytes) -> dict:
             "topology": [
                 {"unit_id": "impl", "owner": "coddy", "phases": [{"name": "build", "shares_card": False, "shares_worktree": False, "shares_branch": False, "shares_candidate": False, "shares_verifier": False}], "parents": []},
                 {"unit_id": "verify", "owner": "tammy", "phases": [{"name": "verify", "shares_card": False, "shares_worktree": False, "shares_branch": False, "shares_candidate": False, "shares_verifier": False}], "parents": ["impl"]},
+                {"unit_id": "integrate", "owner": "ferris", "phases": [{"name": "integrate", "shares_card": False, "shares_worktree": False, "shares_branch": False, "shares_candidate": False, "shares_verifier": False}], "parents": ["verify"]},
             ],
             "candidate_policy": [{"implementation_unit": "impl", "verifier_unit": "verify", "verifier": "tammy"}],
-            "supersession": {"graph_identity": "b" * 64, "predecessor_graph_identity": None, "recovery_attempt": 0},
+            "supersession": {"graph_identity": "", "predecessor_graph_identity": None, "recovery_attempt": 0},
         },
     }
+    refresh_graph_identity(payload)
+    return payload
+
+
+def refresh_graph_identity(payload: dict) -> None:
+    payload["verified_plan"]["supersession"]["graph_identity"] = graph_identity(payload)
 
 
 class Dispatch:
@@ -169,7 +176,7 @@ def test_materialize_creates_native_topology_with_exact_readback(ctx: Dispatch, 
     handoff = VerifiedHandoff.parse(json.loads(ctx.files["handoff.json"]))
     ctx.tasks["T1"]["body"] = "<!-- " + ROOT_MARKER + "\n" + json.dumps({"schema_version": 1, "handoff_identity": handoff.identity(), "graph_identity": handoff.graph_identity}) + "\n-->"
     ctx.cli_tasks["T1"]["body"] = ctx.tasks["T1"]["body"]
-    assert factory.materialize(ctx, {})["created_task_ids"] == ["C1", "C2"]
+    assert factory.materialize(ctx, {})["created_task_ids"] == ["C1", "C2", "C3"]
     creates = [args for name, args in ctx.calls if name == "kanban_create"]
     assert all({"title", "assignee", "body", "parents", "project_id", "idempotency_key"} <= set(args) for args in creates)
 
@@ -178,23 +185,6 @@ def test_materialize_includes_ferris_terminal_fan_in_and_is_idempotent(
     ctx: Dispatch, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     payload = json.loads(ctx.files["handoff.json"])
-    payload["verified_plan"]["topology"].append(
-        {
-            "unit_id": "integrate",
-            "owner": "ferris",
-            "phases": [
-                {
-                    "name": "integrate",
-                    "shares_card": False,
-                    "shares_worktree": False,
-                    "shares_branch": False,
-                    "shares_candidate": False,
-                    "shares_verifier": False,
-                }
-            ],
-            "parents": ["impl", "verify"],
-        }
-    )
     handoff_bytes = json.dumps(payload).encode()
     ctx.files["handoff.json"] = handoff_bytes
     handoff_attachment = next(item for item in ctx.attachments["T1"] if item["filename"] == "handoff.json")
@@ -207,7 +197,7 @@ def test_materialize_includes_ferris_terminal_fan_in_and_is_idempotent(
 
     assert factory.materialize(ctx, {})["created_task_ids"] == ["C1", "C2", "C3"]
     assert ctx.tasks["C3"]["assignee"] == "ferris"
-    assert ctx.parents["C3"] == ["T1", "C1", "C2"]
+    assert ctx.parents["C3"] == ["T1", "C2"]
     ferris_marker = factory._unit_marker(ctx.tasks["C3"])
     assert ferris_marker == {
         "schema_version": 1,
@@ -223,6 +213,58 @@ def test_materialize_includes_ferris_terminal_fan_in_and_is_idempotent(
     all_creates = [args for name, args in ctx.calls if name == "kanban_create"]
     assert len(ctx.tasks) == 4
     assert all_creates[3:] == first_creates
+
+
+def test_verified_handoff_accepts_valid_canonical_graph(ctx: Dispatch) -> None:
+    payload = json.loads(ctx.files["handoff.json"])
+
+    handoff = VerifiedHandoff.parse(payload)
+
+    assert handoff.graph_identity == graph_identity(payload)
+    assert handoff.identity() == handoff.graph_identity
+
+
+def test_verified_handoff_rejects_altered_graph_identity(ctx: Dispatch) -> None:
+    payload = json.loads(ctx.files["handoff.json"])
+    payload["verified_plan"]["supersession"]["graph_identity"] = "a" * 64
+
+    with pytest.raises(ValueError, match="declared graph identity"):
+        VerifiedHandoff.parse(payload)
+
+
+def test_verified_handoff_rejects_topology_cycle_even_with_matching_identity(ctx: Dispatch) -> None:
+    payload = json.loads(ctx.files["handoff.json"])
+    payload["verified_plan"]["topology"][0]["parents"] = ["integrate"]
+    refresh_graph_identity(payload)
+
+    with pytest.raises(ValueError, match="contains a cycle"):
+        VerifiedHandoff.parse(payload)
+
+
+def test_verified_handoff_requires_one_ferris_terminal(ctx: Dispatch) -> None:
+    payload = json.loads(ctx.files["handoff.json"])
+    payload["verified_plan"]["topology"].pop()
+    refresh_graph_identity(payload)
+
+    with pytest.raises(ValueError, match="exactly one ferris terminal"):
+        VerifiedHandoff.parse(payload)
+
+
+def test_verified_handoff_requires_ferris_fan_in_from_every_selected_tammy(ctx: Dispatch) -> None:
+    payload = json.loads(ctx.files["handoff.json"])
+    payload["verified_plan"]["topology"].append(
+        {
+            "unit_id": "followup",
+            "owner": "coddy",
+            "phases": [{"name": "remediate", "shares_card": False, "shares_worktree": False, "shares_branch": False, "shares_candidate": False, "shares_verifier": False}],
+            "parents": ["verify"],
+        }
+    )
+    payload["verified_plan"]["topology"][2]["parents"] = ["followup"]
+    refresh_graph_identity(payload)
+
+    with pytest.raises(ValueError, match="depend on every selected tammy verifier"):
+        VerifiedHandoff.parse(payload)
 
 
 def test_quentin_publishes_exact_idempotent_verified_root(ctx: Dispatch, monkeypatch: pytest.MonkeyPatch) -> None:
