@@ -12,6 +12,29 @@ Handlers parse the JSON strings returned by `PluginContext.dispatch_tool`; they 
 
 Role-scoped registration is exact: Quentin preflight/publish-root/read; Sheila materialize/read; Coddy publish-candidate/read; Tammy validate-candidate/read; Mathew and Ferris register nothing. Quentin's raw `kanban_create` route is blocked in favor of the publication tool, and each handler verifies its runtime profile.
 
+## Clean-profile installation
+
+Use a reviewed immutable repository commit; never install from a profile skill tree or sibling profile directory.
+
+```bash
+git clone https://github.com/artur-ciocanu/software-factory.git
+cd software-factory
+git checkout <reviewed-commit>
+uv build
+uv pip install --python <hermes-runtime-python> --no-deps \
+  dist/software_factory-0.1.0-py3-none-any.whl
+```
+
+For each authorized role profile, use supported Hermes commands—not direct YAML edits:
+
+```bash
+hermes -p <profile> plugins enable software-factory --no-allow-tool-override
+hermes -p <profile> config get platform_toolsets.cli
+hermes -p <profile> config set platform_toolsets.cli '<existing-toolsets-plus-software-factory>'
+```
+
+Enable it only for Quentin, Sheila, Coddy, and Tammy. Keep it disabled for Mathew and Ferris. Preserve Sheila's native allowlist and add only `software-factory`; do not add terminal, file, or code_execution. Start a fresh session after configuration changes. A running gateway requires an operator-approved restart to load the new plugin.
+
 ```bash
 uv sync --dev
 uv run pytest
