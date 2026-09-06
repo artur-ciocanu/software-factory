@@ -1,0 +1,12 @@
+[tools]
+python = "3.11"
+gitleaks = "latest"
+
+[tasks.test]
+run = "uv run python -m pytest"
+
+[tasks.lint]
+run = "uv run ruff check . && uv run ty check src"
+
+[tasks.secrets]
+run = "gitleaks git --staged --redact --no-banner"

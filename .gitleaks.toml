@@ -1,0 +1,4 @@
+title = "software-factory"
+[allowlist]
+description = "No test credentials are committed."
+paths = ['''(^|/)uv.lock$''']
