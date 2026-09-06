@@ -75,15 +75,44 @@ def _dispatch(ctx: Any, name: str, args: Mapping[str, Any]) -> dict[str, Any]:
     return _decode(ctx.dispatch_tool(name, dict(args)), name)
 
 
+def _cli_task(task_id: str) -> dict[str, Any]:
+    """Read the public CLI task representation used only for project identity."""
+    try:
+        result = subprocess.run(
+            ["hermes", "kanban", "show", task_id, "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ContractError("fixed Hermes CLI project identity read failed") from exc
+    if result.returncode != 0:
+        raise ContractError("fixed Hermes CLI project identity read failed")
+    try:
+        task = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ContractError("fixed Hermes CLI project identity read returned malformed JSON") from exc
+    if not isinstance(task, dict) or task.get("id") != task_id:
+        raise ContractError("fixed Hermes CLI task identity is malformed")
+    return task
+
+
 def _show(ctx: Any, task_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
     result = _dispatch(ctx, "kanban_show", {"task_id": task_id})
-    task = result.get("task")
-    if not isinstance(task, dict) or task.get("id") != task_id or not isinstance(task.get("body"), str):
+    native_task = result.get("task")
+    if not isinstance(native_task, dict) or native_task.get("id") != task_id or not isinstance(native_task.get("body"), str):
         raise ContractError("kanban_show task envelope is malformed")
-    if not isinstance(task.get("project_id"), str) or not task["project_id"]:
+    cli_task = _cli_task(task_id)
+    for field in ("id", "body", "assignee", "workspace_kind", "workspace_path", "status"):
+        if field in native_task and field in cli_task and native_task[field] != cli_task[field]:
+            raise ContractError(f"native and CLI task {field} differ")
+    project_id = cli_task.get("project_id")
+    if not isinstance(project_id, str) or not project_id:
         raise ContractError("active task has no project_id")
     if not isinstance(result.get("parents"), list):
         raise ContractError("kanban_show parents are malformed")
+    task = {**native_task, "project_id": project_id}
     return task, result
 
 

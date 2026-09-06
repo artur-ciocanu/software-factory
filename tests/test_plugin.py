@@ -46,10 +46,12 @@ class Dispatch:
     def __init__(self, root: Path) -> None:
         self.root = root
         self.calls: list[tuple[str, dict]] = []
+        self.cli_calls: list[tuple[list[str], dict[str, object]]] = []
         inventory = b'{"schema_version":1,"active_callers":[{"caller":"pkg.main","kind":"production"}]}'
         sealed = b"sealed plan"
         self.files = {"handoff.json": json.dumps(handoff_payload(sealed, inventory)).encode(), "sealed-plan.md": sealed, "caller-inventory.json": inventory}
-        self.tasks = {"T1": {"id": "T1", "project_id": "project-1", "body": "source", "assignee": "quentin", "workspace_path": None}}
+        self.tasks = {"T1": {"id": "T1", "body": "source", "assignee": "quentin", "workspace_kind": None, "workspace_path": None, "status": "open"}}
+        self.cli_tasks = {"T1": {**self.tasks["T1"], "project_id": "project-1"}}
         self.parents = {"T1": []}
         self.attachments = {"T1": []}
         for name, data in self.files.items():
@@ -71,7 +73,8 @@ class Dispatch:
             return json.dumps({"ok": True, "task_id": args["task_id"], "attachments": self.attachments[args["task_id"]]})
         if name == "kanban_create":
             task_id = f"C{len(self.tasks)}"
-            self.tasks[task_id] = {"id": task_id, "project_id": args["project_id"], "body": args["body"], "assignee": args["assignee"], "workspace_path": None}
+            self.tasks[task_id] = {"id": task_id, "body": args["body"], "assignee": args["assignee"], "workspace_kind": None, "workspace_path": None, "status": "open"}
+            self.cli_tasks[task_id] = {**self.tasks[task_id], "project_id": args["project_id"]}
             self.parents[task_id] = args["parents"]
             self.attachments[task_id] = []
             return json.dumps({"ok": True, "task_id": task_id})
@@ -86,7 +89,17 @@ class Dispatch:
 def ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Dispatch:
     monkeypatch.setenv("HERMES_KANBAN_TASK", "T1")
     monkeypatch.setenv("HERMES_KANBAN_ATTACHMENTS_ROOT", str(tmp_path / "attachments"))
-    return Dispatch(tmp_path / "attachments")
+    dispatch = Dispatch(tmp_path / "attachments")
+    original_run = subprocess.run
+
+    def run(args, **kwargs):
+        if args[0] == "hermes":
+            dispatch.cli_calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 0, json.dumps(dispatch.cli_tasks[args[3]]), "")
+        return original_run(args, **kwargs)
+
+    monkeypatch.setattr(factory.subprocess, "run", run)
+    return dispatch
 
 
 def test_preflight_uses_json_string_native_envelopes_and_attachment_paths(ctx: Dispatch, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -95,6 +108,7 @@ def test_preflight_uses_json_string_native_envelopes_and_attachment_paths(ctx: D
     assert result["ok"] is True
     assert {name for name, _ in ctx.calls} == {"kanban_show", "kanban_attachments"}
     assert all("include_bytes" not in args for _, args in ctx.calls)
+    assert ctx.cli_calls == [(["hermes", "kanban", "show", "T1", "--json"], {"check": False, "capture_output": True, "text": True, "timeout": 15})]
 
 
 def test_wrong_profile_fails_closed_before_native_calls(ctx: Dispatch, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -102,6 +116,33 @@ def test_wrong_profile_fails_closed_before_native_calls(ctx: Dispatch, monkeypat
     with pytest.raises(ValueError, match="requires quentin"):
         factory.preflight(ctx, {})
     assert ctx.calls == []
+
+
+def test_rejects_cli_task_mismatch(ctx: Dispatch, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HERMES_PROFILE", "quentin")
+    ctx.cli_tasks["T1"]["status"] = "done"
+    with pytest.raises(ValueError, match="native and CLI task status differ"):
+        factory.preflight(ctx, {})
+
+
+def test_rejects_cli_task_without_project_id(ctx: Dispatch, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HERMES_PROFILE", "quentin")
+    del ctx.cli_tasks["T1"]["project_id"]
+    with pytest.raises(ValueError, match="active task has no project_id"):
+        factory.preflight(ctx, {})
+
+
+def test_rejects_malformed_cli_json(ctx: Dispatch, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HERMES_PROFILE", "quentin")
+
+    def malformed_cli(args, **kwargs):
+        assert args == ["hermes", "kanban", "show", "T1", "--json"]
+        assert kwargs == {"check": False, "capture_output": True, "text": True, "timeout": 15}
+        return subprocess.CompletedProcess(args, 0, "{", "")
+
+    monkeypatch.setattr(factory.subprocess, "run", malformed_cli)
+    with pytest.raises(ValueError, match="malformed JSON"):
+        factory.preflight(ctx, {})
 
 
 def test_rejects_attachment_outside_active_task_root(ctx: Dispatch, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -116,6 +157,7 @@ def test_materialize_creates_native_topology_with_exact_readback(ctx: Dispatch, 
     monkeypatch.setenv("HERMES_PROFILE", "sheila")
     handoff = VerifiedHandoff.parse(json.loads(ctx.files["handoff.json"]))
     ctx.tasks["T1"]["body"] = "<!-- " + ROOT_MARKER + "\n" + json.dumps({"schema_version": 1, "handoff_identity": handoff.identity(), "graph_identity": handoff.graph_identity}) + "\n-->"
+    ctx.cli_tasks["T1"]["body"] = ctx.tasks["T1"]["body"]
     assert factory.materialize(ctx, {})["created_task_ids"] == ["C1", "C2"]
     creates = [args for name, args in ctx.calls if name == "kanban_create"]
     assert all({"title", "assignee", "body", "parents", "project_id", "idempotency_key"} <= set(args) for args in creates)
@@ -124,6 +166,7 @@ def test_materialize_creates_native_topology_with_exact_readback(ctx: Dispatch, 
 def test_publish_then_validate_candidate_receipt_with_read_only_tammy(ctx: Dispatch, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     handoff = VerifiedHandoff.parse(json.loads(ctx.files["handoff.json"]))
     ctx.tasks["T1"]["body"] = "<!-- " + ROOT_MARKER + "\n" + json.dumps({"schema_version": 1, "handoff_identity": handoff.identity(), "graph_identity": handoff.graph_identity}) + "\n-->"
+    ctx.cli_tasks["T1"]["body"] = ctx.tasks["T1"]["body"]
     monkeypatch.setenv("HERMES_PROFILE", "sheila")
     factory.materialize(ctx, {})
     worktree = tmp_path / "worktree"
@@ -131,6 +174,7 @@ def test_publish_then_validate_candidate_receipt_with_read_only_tammy(ctx: Dispa
     for command in (["git", "init"], ["git", "config", "user.email", "test@example.invalid"], ["git", "config", "user.name", "Test"], ["git", "commit", "--allow-empty", "-m", "candidate"]):
         subprocess.run(command, cwd=worktree, check=True, capture_output=True)
     ctx.tasks["C1"]["workspace_path"] = str(worktree)
+    ctx.cli_tasks["C1"]["workspace_path"] = str(worktree)
     monkeypatch.setenv("HERMES_KANBAN_TASK", "C1")
     monkeypatch.setenv("HERMES_PROFILE", "coddy")
     receipt = factory.publish(ctx, {})
@@ -159,6 +203,7 @@ def test_sheila_raw_create_guard_only_blocks_verified_root(ctx: Dispatch, monkey
     assert factory._raw_create_guard(ctx, "kanban_create", {}) is None
     handoff = VerifiedHandoff.parse(json.loads(ctx.files["handoff.json"]))
     ctx.tasks["T1"]["body"] = "<!-- " + ROOT_MARKER + "\n" + json.dumps({"schema_version": 1, "handoff_identity": handoff.identity(), "graph_identity": handoff.graph_identity}) + "\n-->"
+    ctx.cli_tasks["T1"]["body"] = ctx.tasks["T1"]["body"]
     assert factory._raw_create_guard(ctx, "kanban_create", {})["action"] == "block"
 
 
