@@ -376,7 +376,9 @@ def test_sheila_raw_create_guard_only_blocks_verified_root(ctx: Dispatch, monkey
     handoff = VerifiedHandoff.parse(json.loads(ctx.files["handoff.json"]))
     ctx.tasks["T1"]["body"] = "<!-- " + ROOT_MARKER + "\n" + json.dumps({"schema_version": 1, "handoff_identity": handoff.identity(), "graph_identity": handoff.graph_identity}) + "\n-->"
     ctx.cli_tasks["T1"]["body"] = ctx.tasks["T1"]["body"]
-    assert factory._raw_create_guard(ctx, "kanban_create", {})["action"] == "block"
+    guard = factory._raw_create_guard(ctx, "kanban_create", {})
+    assert guard is not None
+    assert guard["action"] == "block"
 
 
 def test_registration_is_exact_for_all_profiles() -> None:
