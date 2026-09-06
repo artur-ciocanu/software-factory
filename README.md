@@ -2,14 +2,15 @@
 
 A pip-entrypoint Hermes plugin for a fail-closed v2 Kanban evidence flow.
 
-- Quentin can preflight only `handoff.json`, `sealed-plan.md`, and `caller-inventory.json` attached to the active source task. Their bytes are read only after each `stored_path` is contained beneath the documented Kanban attachment root and active task directory.
-- Sheila only materializes a root whose body is an exact `SOFTWARE-FACTORY-VERIFIED-PLAN` marker bound to those same three attachments. It creates Coddy and Tammy tasks with native `kanban_create` fields, deterministic idempotency keys, and exact `kanban_show` readback.
+- Quentin can preflight and publish exactly one verified root from only `handoff.json`, `sealed-plan.md`, and `caller-inventory.json` attached to the active source task. Their bytes are read only after each `stored_path` is contained beneath the documented Kanban attachment root and active task directory.
+- `software_factory_publish_verified_root` is Quentin's sole root-creation path. It first validates those three source attachments, then uses fixed native `kanban_create` fields to create or reuse a Sheila-assigned root in the CLI-verified project, parented to the source task. Its canonical body is only the `SOFTWARE-FACTORY-VERIFIED-PLAN` marker with `schema_version`, `handoff_identity`, and `graph_identity`. It attaches byte-identical immutable copies of all three inputs with fixed native `kanban_attach` calls and returns durable exact readback. Its idempotency key binds source task, CLI project, handoff identity, and graph identity; a retry reuses a root only when its root fields and all attachment bytes pass exact readback, never repairing a partial or mismatched root.
+- Sheila only materializes a root whose body is that exact marker bound to those same three attachments. It creates Coddy and Tammy tasks with native `kanban_create` fields, deterministic idempotency keys, and exact `kanban_show` readback.
 - Coddy derives a full lowercase Git `HEAD` SHA from the persisted task worktree using a fixed argv-only Git invocation, then attaches one canonical `candidate-receipt.json` and reads it back exactly.
 - Tammy uses native `kanban_show` and `kanban_attachments` plus validated attachment bytes. It verifies the receipt's canonical identity, task/project/graph binding, and independent-verifier policy.
 
 Handlers parse the JSON strings returned by `PluginContext.dispatch_tool`; they do not assume dict returns or unsupported attachment byte options. No handler accepts a model-supplied filesystem path or native tool name.
 
-Role-scoped registration is exact: Quentin preflight/read; Sheila materialize/read; Coddy publish/read; Tammy validate/read; Mathew and Ferris register nothing. Each handler also verifies its runtime profile.
+Role-scoped registration is exact: Quentin preflight/publish-root/read; Sheila materialize/read; Coddy publish-candidate/read; Tammy validate-candidate/read; Mathew and Ferris register nothing. Quentin's raw `kanban_create` route is blocked in favor of the publication tool, and each handler verifies its runtime profile.
 
 ```bash
 uv sync --dev

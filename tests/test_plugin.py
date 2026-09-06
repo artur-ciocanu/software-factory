@@ -55,6 +55,7 @@ class Dispatch:
         self.cli_tasks = {"T1": {**self.tasks["T1"], "project_id": "project-1"}}
         self.parents = {"T1": []}
         self.attachments = {"T1": []}
+        self.idempotency: dict[str, str] = {}
         for name, data in self.files.items():
             self.add_attachment("T1", name, data)
 
@@ -73,11 +74,14 @@ class Dispatch:
         if name == "kanban_attachments":
             return json.dumps({"ok": True, "task_id": args["task_id"], "attachments": self.attachments[args["task_id"]]})
         if name == "kanban_create":
+            if args["idempotency_key"] in self.idempotency:
+                return json.dumps({"ok": True, "task_id": self.idempotency[args["idempotency_key"]]})
             task_id = f"C{len(self.tasks)}"
             self.tasks[task_id] = {"id": task_id, "body": args["body"], "assignee": args["assignee"], "workspace_kind": None, "workspace_path": None, "status": "open"}
             self.cli_tasks[task_id] = {**self.tasks[task_id], "project_id": args["project_id"]}
             self.parents[task_id] = args["parents"]
             self.attachments[task_id] = []
+            self.idempotency[args["idempotency_key"]] = task_id
             return json.dumps({"ok": True, "task_id": task_id})
         if name == "kanban_attach":
             self.add_attachment(args["task_id"], args["filename"], base64.b64decode(args["content_base64"]))
@@ -170,6 +174,74 @@ def test_materialize_creates_native_topology_with_exact_readback(ctx: Dispatch, 
     assert all({"title", "assignee", "body", "parents", "project_id", "idempotency_key"} <= set(args) for args in creates)
 
 
+def test_quentin_publishes_exact_idempotent_verified_root(ctx: Dispatch, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HERMES_PROFILE", "quentin")
+    result = factory.publish_verified_root(ctx, {})
+    assert result["root_task_id"] == "C1"
+    assert result["idempotent"] is False
+    assert result["root_task"]["assignee"] == "sheila"
+    assert result["parents"] == ["T1"]
+    assert set(result["attachments"]) == {"handoff.json", "sealed-plan.md", "caller-inventory.json"}
+    assert ctx.tasks["C1"]["body"] == factory._verified_root_body(
+        VerifiedHandoff.parse(json.loads(ctx.files["handoff.json"]))
+    )
+    assert {item["filename"] for item in ctx.attachments["C1"]} == set(ctx.files)
+    assert all(
+        (ctx.root / "C1" / name).read_bytes() == data for name, data in ctx.files.items()
+    )
+    creates = [args for name, args in ctx.calls if name == "kanban_create"]
+    assert creates == [
+        {
+            "title": "Verified plan plan-a",
+            "assignee": "sheila",
+            "body": ctx.tasks["C1"]["body"],
+            "parents": ["T1"],
+            "project_id": "project-1",
+            "idempotency_key": creates[0]["idempotency_key"],
+        }
+    ]
+    assert factory.publish_verified_root(ctx, {})["idempotent"] is True
+    assert len([args for name, args in ctx.calls if name == "kanban_create"]) == 2
+    assert len(ctx.attachments["C1"]) == 3
+
+
+def test_quentin_publish_fails_before_create_for_invalid_evidence(
+    ctx: Dispatch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HERMES_PROFILE", "quentin")
+    ctx.files["sealed-plan.md"] = b"tampered"
+    (ctx.root / "T1" / "sealed-plan.md").write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="attachment size differs"):
+        factory.publish_verified_root(ctx, {})
+    assert not any(name == "kanban_create" for name, _ in ctx.calls)
+    assert len(ctx.tasks) == 1
+
+
+def test_quentin_publish_does_not_repair_partial_root(
+    ctx: Dispatch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HERMES_PROFILE", "quentin")
+    ctx.add_attachment("C1", "handoff.json", ctx.files["handoff.json"])
+    handoff = VerifiedHandoff.parse(json.loads(ctx.files["handoff.json"]))
+    body = factory._verified_root_body(handoff)
+    ctx.tasks["C1"] = {"id": "C1", "body": body, "assignee": "sheila", "workspace_kind": None, "workspace_path": None, "status": "open"}
+    ctx.cli_tasks["C1"] = {**ctx.tasks["C1"], "project_id": "project-1"}
+    ctx.parents["C1"] = ["T1"]
+    identity = factory.digest(
+        {
+            "source_task_id": "T1",
+            "project_id": "project-1",
+            "handoff_identity": handoff.identity(),
+            "graph_identity": handoff.graph_identity,
+        }
+    )
+    ctx.idempotency = {f"software-factory:verified-root:{identity}": "C1"}
+    with pytest.raises(ValueError, match="incomplete immutable evidence"):
+        factory.publish_verified_root(ctx, {})
+    assert len(ctx.attachments["C1"]) == 1
+    assert not any(name == "kanban_attach" for name, _ in ctx.calls)
+
+
 def test_publish_then_validate_candidate_receipt_with_read_only_tammy(ctx: Dispatch, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     handoff = VerifiedHandoff.parse(json.loads(ctx.files["handoff.json"]))
     ctx.tasks["T1"]["body"] = "<!-- " + ROOT_MARKER + "\n" + json.dumps({"schema_version": 1, "handoff_identity": handoff.identity(), "graph_identity": handoff.graph_identity}) + "\n-->"
@@ -212,6 +284,35 @@ def test_sheila_raw_create_guard_only_blocks_verified_root(ctx: Dispatch, monkey
     ctx.tasks["T1"]["body"] = "<!-- " + ROOT_MARKER + "\n" + json.dumps({"schema_version": 1, "handoff_identity": handoff.identity(), "graph_identity": handoff.graph_identity}) + "\n-->"
     ctx.cli_tasks["T1"]["body"] = ctx.tasks["T1"]["body"]
     assert factory._raw_create_guard(ctx, "kanban_create", {})["action"] == "block"
+
+
+def test_registration_is_exact_for_all_profiles() -> None:
+    class Registry:
+        def __init__(self, profile_name: str) -> None:
+            self.profile_name = profile_name
+            self.tools: list[dict] = []
+            self.hooks: list[str] = []
+
+        def register_tool(self, **kwargs):
+            self.tools.append(kwargs)
+
+        def register_hook(self, name, _handler):
+            self.hooks.append(name)
+
+    expected = {
+        "quentin": {"software_factory_preflight_verified_plan", "software_factory_publish_verified_root", "software_factory_read_receipt"},
+        "sheila": {"software_factory_materialize_verified_plan", "software_factory_read_receipt"},
+        "coddy": {"software_factory_publish_candidate_receipt", "software_factory_read_receipt"},
+        "tammy": {"software_factory_validate_candidate_receipt", "software_factory_read_receipt"},
+        "mathew": set(),
+        "ferris": set(),
+    }
+    for profile, names in expected.items():
+        registry = Registry(profile)
+        factory.register(registry)
+        assert {tool["name"] for tool in registry.tools} == names
+        assert all(tool["schema"] == factory.SCHEMAS[tool["name"]] for tool in registry.tools)
+        assert registry.hooks == (["pre_tool_call"] if profile in {"quentin", "sheila"} else [])
 
 
 def test_package_compiles_with_configured_hermes_python() -> None:

@@ -24,7 +24,11 @@ from .validation import (
 
 TOOLSET = "software-factory"
 ROLES = {
-    "quentin": {"software_factory_preflight_verified_plan", "software_factory_read_receipt"},
+    "quentin": {
+        "software_factory_preflight_verified_plan",
+        "software_factory_publish_verified_root",
+        "software_factory_read_receipt",
+    },
     "sheila": {"software_factory_materialize_verified_plan", "software_factory_read_receipt"},
     "coddy": {"software_factory_publish_candidate_receipt", "software_factory_read_receipt"},
     "tammy": {"software_factory_validate_candidate_receipt", "software_factory_read_receipt"},
@@ -217,6 +221,116 @@ def preflight(ctx: Any, _args: Mapping[str, Any]) -> dict[str, Any]:
     return {"ok": True, "task_id": task["id"], "project_id": task["project_id"], "handoff_identity": handoff.identity(), "graph_identity": handoff.graph_identity}
 
 
+def _verified_root_body(handoff: VerifiedHandoff) -> str:
+    marker = {
+        "schema_version": 1,
+        "handoff_identity": handoff.identity(),
+        "graph_identity": handoff.graph_identity,
+    }
+    return f"<!-- {ROOT_MARKER}\n{canonical_json(marker).decode()}\n-->"
+
+
+def _required_attachment_metadata(
+    ctx: Any, task_id: str
+) -> dict[str, Mapping[str, Any]]:
+    listed = _dispatch(ctx, "kanban_attachments", {"task_id": task_id})
+    if listed.get("task_id") != task_id or listed.get("ok") is not True or not isinstance(
+        listed.get("attachments"), list
+    ):
+        raise ContractError("kanban attachment envelope is malformed")
+    by_name: dict[str, Mapping[str, Any]] = {}
+    for item in listed["attachments"]:
+        if not isinstance(item, dict):
+            raise ContractError("attachment list item is malformed")
+        name = item.get("filename")
+        if name in HANDOFF_FILENAMES:
+            if name in by_name:
+                raise ContractError("required attachment filename is ambiguous")
+            by_name[name] = item
+    return by_name
+
+
+def _verified_root_readback(
+    ctx: Any, root_id: str, source_id: str, source: Mapping[str, Any], handoff: VerifiedHandoff,
+    attachments: Mapping[str, bytes], body: str
+) -> dict[str, Any]:
+    root, envelope = _show(ctx, root_id)
+    if (
+        root.get("body") != body
+        or root.get("assignee") != "sheila"
+        or root.get("project_id") != source["project_id"]
+        or envelope["parents"] != [source_id]
+    ):
+        raise ContractError("verified-plan root exact readback failed")
+    marker = _root_marker(root)
+    if marker["handoff_identity"] != handoff.identity() or marker["graph_identity"] != handoff.graph_identity:
+        raise ContractError("verified-plan root marker is not bound to source evidence")
+    metadata = _required_attachment_metadata(ctx, root_id)
+    if set(metadata) != set(HANDOFF_FILENAMES):
+        raise ContractError("verified-plan root has incomplete immutable evidence")
+    for name in HANDOFF_FILENAMES:
+        if _read_attachment(root_id, metadata[name]) != attachments[name]:
+            raise ContractError("verified-plan root immutable evidence differs from source")
+    return {
+        "ok": True,
+        "root_task": root,
+        "parents": envelope["parents"],
+        "attachments": {name: metadata[name] for name in HANDOFF_FILENAMES},
+    }
+
+
+def publish_verified_root(ctx: Any, _args: Mapping[str, Any]) -> dict[str, Any]:
+    """Publish the sole Sheila-assigned root after validating Quentin's source evidence."""
+    _require_role(ctx, "quentin")
+    source_id = _active_task_id()
+    source, handoff, attachments = _evidence(ctx, source_id)
+    body = _verified_root_body(handoff)
+    identity = digest(
+        {
+            "source_task_id": source_id,
+            "project_id": source["project_id"],
+            "handoff_identity": handoff.identity(),
+            "graph_identity": handoff.graph_identity,
+        }
+    )
+    created = _dispatch(
+        ctx,
+        "kanban_create",
+        {
+            "title": f"Verified plan {handoff.plan_id}",
+            "assignee": "sheila",
+            "body": body,
+            "parents": [source_id],
+            "project_id": source["project_id"],
+            "idempotency_key": f"software-factory:verified-root:{identity}",
+        },
+    )
+    root_id = created.get("task_id")
+    if not isinstance(root_id, str) or not root_id:
+        raise ContractError("verified-plan root create response is malformed")
+    existing = _required_attachment_metadata(ctx, root_id)
+    if existing:
+        readback = _verified_root_readback(
+            ctx, root_id, source_id, source, handoff, attachments, body
+        )
+        return {**readback, "root_task_id": root_id, "idempotent": True}
+    for name in HANDOFF_FILENAMES:
+        attached = _dispatch(
+            ctx,
+            "kanban_attach",
+            {
+                "task_id": root_id,
+                "filename": name,
+                "content_type": "application/json" if name.endswith(".json") else "text/markdown",
+                "content_base64": base64.b64encode(attachments[name]).decode(),
+            },
+        )
+        if attached.get("task_id") != root_id or not isinstance(attached.get("attachment_id"), int):
+            raise ContractError("verified-plan root attach response is malformed")
+    readback = _verified_root_readback(ctx, root_id, source_id, source, handoff, attachments, body)
+    return {**readback, "root_task_id": root_id, "idempotent": False}
+
+
 def materialize(ctx: Any, _args: Mapping[str, Any]) -> dict[str, Any]:
     _require_role(ctx, "sheila")
     root_id = _active_task_id()
@@ -338,12 +452,25 @@ def _raw_create_guard(ctx: Any, tool_name: str, _args: Mapping[str, Any] | None 
     return {"action": "block", "message": "verified-plan roots may materialize topology only through software_factory_materialize_verified_plan"}
 
 
+def _raw_quentin_create_guard(
+    _ctx: Any, tool_name: str, _args: Mapping[str, Any] | None = None, **_: Any
+) -> dict[str, str] | None:
+    if tool_name != "kanban_create":
+        return None
+    return {
+        "action": "block",
+        "message": "verified-plan roots may be created only through software_factory_publish_verified_root",
+    }
+
+
 def register(ctx: Any) -> None:
     role = _profile(ctx)
-    handlers: dict[str, Callable[[Any, Mapping[str, Any]], dict[str, Any]]] = {"software_factory_preflight_verified_plan": preflight, "software_factory_materialize_verified_plan": materialize, "software_factory_publish_candidate_receipt": publish, "software_factory_validate_candidate_receipt": validate, "software_factory_read_receipt": read_receipt}
+    handlers: dict[str, Callable[[Any, Mapping[str, Any]], dict[str, Any]]] = {"software_factory_preflight_verified_plan": preflight, "software_factory_publish_verified_root": publish_verified_root, "software_factory_materialize_verified_plan": materialize, "software_factory_publish_candidate_receipt": publish, "software_factory_validate_candidate_receipt": validate, "software_factory_read_receipt": read_receipt}
     for name in ROLES.get(role, set()):
         def bound(args: Mapping[str, Any], _handler: Callable[[Any, Mapping[str, Any]], dict[str, Any]] = handlers[name], **_: Any) -> str:
             return json.dumps(_handler(ctx, args), sort_keys=True)
         ctx.register_tool(name=name, toolset=TOOLSET, schema=SCHEMAS[name], handler=bound)
     if role == "sheila":
         ctx.register_hook("pre_tool_call", lambda tool_name, args=None, **kwargs: _raw_create_guard(ctx, tool_name, args, **kwargs))
+    if role == "quentin":
+        ctx.register_hook("pre_tool_call", lambda tool_name, args=None, **kwargs: _raw_quentin_create_guard(ctx, tool_name, args, **kwargs))
