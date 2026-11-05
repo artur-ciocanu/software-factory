@@ -1,0 +1,12 @@
+name: software-factory
+version: 0.1.0
+description: Fail-closed Hermes Kanban factory plugin
+provides_tools:
+  - software_factory_preflight_verified_plan
+  - software_factory_publish_verified_root
+  - software_factory_materialize_verified_plan
+  - software_factory_publish_candidate_receipt
+  - software_factory_validate_candidate_receipt
+  - software_factory_read_receipt
+provides_hooks:
+  - pre_tool_call
