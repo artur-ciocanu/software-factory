@@ -18,7 +18,7 @@ Install the reviewed directory through Hermes, not a wheel into the current Pyth
 
 The project is intentionally virtual (`tool.uv.package = false`, no build backend or pip entry point), not a wheel distribution. Four buildable profile-local copies named `software-factory` would collide in Hermes' shared workspace. Current PM gives virtual members distinct path-derived names and strips their development dependency groups during runtime preparation. Runtime dependencies remain empty. Keep the entire plugin directory intact, including `src/`; do not install it from a profile skill tree or sibling profile directory.
 
-After review and publication of the pinned commit, run the following **only** for `quentin`, `sheila`, `coddy`, and `tammy` (the pin is the packaging/test implementation commit; a later documentation-only commit records it):
+After review and publication of the pinned commit, run the following **only** for `quentin`, `sheila`, `coddy`, and `tammy` (the pin is the packaging/test implementation commit; later documentation-only commits record it and clarify rollout). These commands are an operator-approved activation/migration, **not** an unconditional staging-only procedure: `--no-enable` prevents a new enablement but does not disable an existing selection. Installation/replacement and enablement can notify running backends/gateways to load the plugin, making hooks live before a new chat starts. For staging-only validation, use an isolated home/runtime rather than an already-selected production profile.
 
 ```bash
 SF_COMMIT=cb92461ec1774832fd0c3b7f5575cf1cbf088daa
@@ -38,7 +38,7 @@ Using the existing toolset list returned above, append only `software-factory` w
 hermes -p <profile> config set platform_toolsets.cli '<existing-toolsets-plus-software-factory>'
 ```
 
-Do not install or enable this plugin for Mathew or Ferris. Preserve every profile's existing restrictions. In particular, preserve Sheila's native allowlist and add only `software-factory`; **do not add terminal, file, or code_execution**. This packaging change grants no tool overrides or new permissions. Start a fresh session after configuration changes. A running gateway requires a separately operator-approved restart; installation is not an instruction to restart it.
+Do not install or enable this plugin for Mathew or Ferris. Preserve every profile's existing restrictions. In particular, preserve Sheila's native allowlist and add only `software-factory`; **do not add terminal, file, or code_execution**. This packaging change grants no tool overrides or new permissions. Read Hermes' activation report after each operation: hooks may be live immediately, while Python tools are deferred to a fresh session. Do not assume a gateway restart is required or that avoiding a restart prevents activation. Any separately needed gateway restart requires its own operator approval.
 
 Older wheel-only installations are not the supported deployment. A same-name directory identity shadows a pip entry point in current Hermes discovery, but this tree declares no pip entry point and does not rely on one. Inspect migration state with `plugins list`; do not manually inject the old wheel into a replacement PM environment.
 
