@@ -21,7 +21,7 @@ The project is intentionally virtual (`tool.uv.package = false`, no build backen
 After review and publication of the pinned commit, run the following **only** for `quentin`, `sheila`, `coddy`, and `tammy` (the pin is the packaging/test implementation commit; a later documentation-only commit records it):
 
 ```bash
-SF_COMMIT=REVIEWED_PACKAGING_COMMIT
+SF_COMMIT=cb92461ec1774832fd0c3b7f5575cf1cbf088daa
 for profile in quentin sheila coddy tammy; do
   hermes -p "$profile" plugins install \
     https://github.com/artur-ciocanu/software-factory.git \
